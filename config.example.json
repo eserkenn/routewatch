@@ -1,0 +1,31 @@
+{
+  "check_interval_seconds": 60,
+  "alert_cooldown_seconds": 300,
+  "routes": [
+    {
+      "name": "Homepage",
+      "url": "https://example.com/",
+      "method": "GET",
+      "timeout": 5.0,
+      "latency_threshold_ms": 300.0,
+      "expected_status": 200,
+      "headers": {
+        "User-Agent": "routewatch/1.0"
+      }
+    },
+    {
+      "name": "API Health",
+      "url": "https://api.example.com/health",
+      "method": "GET",
+      "timeout": 3.0,
+      "latency_threshold_ms": 150.0,
+      "expected_status": 200
+    }
+  ],
+  "webhooks": [
+    {
+      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+      "secret": null
+    }
+  ]
+}
