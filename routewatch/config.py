@@ -1,67 +1,63 @@
-"""Configuration loader for routewatch."""
+"""Configuration models and loader for routewatch."""
 
-import os
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class RouteConfig:
-    url: str
     name: str
-    method: str = "GET"
-    timeout: float = 5.0
-    latency_threshold_ms: float = 500.0
-    headers: dict = field(default_factory=dict)
+    url: str
+    interval_seconds: int = 60
     expected_status: int = 200
+    latency_threshold_ms: float = 500.0
+    history_size: int = 10
 
 
 @dataclass
 class WebhookConfig:
     url: str
-    secret: Optional[str] = None
+    headers: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class AppConfig:
     routes: List[RouteConfig]
-    webhooks: List[WebhookConfig]
-    check_interval_seconds: int = 60
-    alert_cooldown_seconds: int = 300
+    webhook: Optional[WebhookConfig] = None
+    log_level: str = "INFO"
 
 
-def load_config(path: Optional[str] = None) -> AppConfig:
-    """Load configuration from a JSON file."""
-    config_path = path or os.environ.get("ROUTEWATCH_CONFIG", "config.json")
+def _parse_route(raw: Dict[str, Any]) -> RouteConfig:
+    return RouteConfig(
+        name=raw["name"],
+        url=raw["url"],
+        interval_seconds=raw.get("interval_seconds", 60),
+        expected_status=raw.get("expected_status", 200),
+        latency_threshold_ms=raw.get("latency_threshold_ms", 500.0),
+        history_size=raw.get("history_size", 10),
+    )
 
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, "r") as f:
-        raw = json.load(f)
+def _parse_webhook(raw: Optional[Dict[str, Any]]) -> Optional[WebhookConfig]:
+    if raw is None:
+        return None
+    return WebhookConfig(
+        url=raw["url"],
+        headers=raw.get("headers", {}),
+    )
 
-    routes = [
-        RouteConfig(
-            url=r["url"],
-            name=r.get("name", r["url"]),
-            method=r.get("method", "GET"),
-            timeout=r.get("timeout", 5.0),
-            latency_threshold_ms=r.get("latency_threshold_ms", 500.0),
-            headers=r.get("headers", {}),
-            expected_status=r.get("expected_status", 200),
-        )
-        for r in raw.get("routes", [])
-    ]
 
-    webhooks = [
-        WebhookConfig(url=w["url"], secret=w.get("secret"))
-        for w in raw.get("webhooks", [])
-    ]
-
+def load_config(path: str | Path) -> AppConfig:
+    """Load and parse an AppConfig from a JSON file."""
+    data = json.loads(Path(path).read_text())
+    routes = [_parse_route(r) for r in data.get("routes", [])]
+    webhook = _parse_webhook(data.get("webhook"))
     return AppConfig(
         routes=routes,
-        webhooks=webhooks,
-        check_interval_seconds=raw.get("check_interval_seconds", 60),
-        alert_cooldown_seconds=raw.get("alert_cooldown_seconds", 300),
+        webhook=webhook,
+        log_level=data.get("log_level", "INFO"),
     )
