@@ -78,3 +78,17 @@ def test_multiple_routes_mixed_health(collector, history):
     assert report.total_routes == 2
     assert report.healthy_routes == 1
     assert report.unhealthy_routes == 1
+
+
+def test_route_summary_includes_url(collector, history):
+    """Each RouteSummary should carry the URL from the provided route mapping."""
+    collector.record_success("api_health")
+    report = build_status_report(collector, history, {"api_health": "http://example.com/health"})
+    assert report.routes[0].url == "http://example.com/health"
+
+
+def test_route_summary_includes_name(collector, history):
+    """Each RouteSummary should carry the route name key."""
+    collector.record_success("api_health")
+    report = build_status_report(collector, history, {"api_health": "http://example.com/health"})
+    assert report.routes[0].name == "api_health"
