@@ -1,4 +1,4 @@
-"""Configuration dataclasses and loader for routewatch."""
+"""Configuration loading and validation for routewatch."""
 
 from __future__ import annotations
 
@@ -11,66 +11,64 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class RouteConfig:
     url: str
-    name: str = ""
     method: str = "GET"
     interval_seconds: int = 60
-    timeout_seconds: float = 10.0
+    timeout_seconds: int = 10
     expected_status: int = 200
-    latency_threshold_ms: Optional[float] = None
-    headers: Dict[str, str] = field(default_factory=dict)
+    latency_threshold_ms: float = 2000.0
+    name: Optional[str] = None
 
 
 @dataclass
 class WebhookConfig:
     url: str
-    secret: str = ""
-    timeout_seconds: float = 5.0
+    secret: Optional[str] = None
 
 
 @dataclass
 class AppConfig:
     routes: List[RouteConfig]
-    webhooks: List[WebhookConfig]
-    history_path: str = "latency_history.json"
-    history_max_entries: int = 500
+    webhooks: List[WebhookConfig] = field(default_factory=list)
     log_level: str = "INFO"
-    log_file: Optional[str] = None
+    history_path: str = ".routewatch_history.json"
+    consecutive_failures_threshold: int = 3
+    alert_cooldown_seconds: int = 300
+    health_endpoint_enabled: bool = False
+    health_endpoint_host: str = "127.0.0.1"
+    health_endpoint_port: int = 9090
 
 
 def _parse_route(raw: Dict[str, Any]) -> RouteConfig:
     return RouteConfig(
         url=raw["url"],
-        name=raw.get("name", ""),
-        method=raw.get("method", "GET").upper(),
-        interval_seconds=int(raw.get("interval_seconds", 60)),
-        timeout_seconds=float(raw.get("timeout_seconds", 10.0)),
-        expected_status=int(raw.get("expected_status", 200)),
-        latency_threshold_ms=(
-            float(raw["latency_threshold_ms"])
-            if "latency_threshold_ms" in raw
-            else None
-        ),
-        headers=raw.get("headers", {}),
+        method=raw.get("method", "GET"),
+        interval_seconds=raw.get("interval_seconds", 60),
+        timeout_seconds=raw.get("timeout_seconds", 10),
+        expected_status=raw.get("expected_status", 200),
+        latency_threshold_ms=raw.get("latency_threshold_ms", 2000.0),
+        name=raw.get("name"),
     )
 
 
 def _parse_webhook(raw: Dict[str, Any]) -> WebhookConfig:
     return WebhookConfig(
         url=raw["url"],
-        secret=raw.get("secret", ""),
-        timeout_seconds=float(raw.get("timeout_seconds", 5.0)),
+        secret=raw.get("secret"),
     )
 
 
-def load_config(path: str | Path) -> AppConfig:
-    with open(path) as fh:
-        data: Dict[str, Any] = json.load(fh)
-
+def load_config(path: str) -> AppConfig:
+    data = json.loads(Path(path).read_text())
+    routes = [_parse_route(r) for r in data.get("routes", [])]
+    webhooks = [_parse_webhook(w) for w in data.get("webhooks", [])]
     return AppConfig(
-        routes=[_parse_route(r) for r in data.get("routes", [])],
-        webhooks=[_parse_webhook(w) for w in data.get("webhooks", [])],
-        history_path=data.get("history_path", "latency_history.json"),
-        history_max_entries=int(data.get("history_max_entries", 500)),
+        routes=routes,
+        webhooks=webhooks,
         log_level=data.get("log_level", "INFO"),
-        log_file=data.get("log_file"),
+        history_path=data.get("history_path", ".routewatch_history.json"),
+        consecutive_failures_threshold=data.get("consecutive_failures_threshold", 3),
+        alert_cooldown_seconds=data.get("alert_cooldown_seconds", 300),
+        health_endpoint_enabled=data.get("health_endpoint_enabled", False),
+        health_endpoint_host=data.get("health_endpoint_host", "127.0.0.1"),
+        health_endpoint_port=data.get("health_endpoint_port", 9090),
     )
