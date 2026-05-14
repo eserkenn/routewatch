@@ -1,67 +1,71 @@
-"""Scheduler: periodically runs route checks and triggers alerts."""
+"""Route scheduler — runs periodic checks and fires alerts."""
 
-import asyncio
-import logging
-from typing import Dict
+import threading
+from typing import List, Optional
 
 from routewatch.alerter import build_payload, send_alert
 from routewatch.checker import RouteChecker, is_alert
-from routewatch.config import AppConfig, RouteConfig
+from routewatch.config import AppConfig, RouteConfig, WebhookConfig
+from routewatch.history import LatencyHistory
+from routewatch.logging_config import get_logger
+from routewatch.metrics import get_collector
+from routewatch.metrics_reporter import MetricsReporter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class RouteScheduler:
-    """Manages periodic checking of all configured routes."""
+    """Schedules periodic HTTP checks for all configured routes."""
 
     def __init__(self, config: AppConfig) -> None:
-        self.config = config
-        self._checkers: Dict[str, RouteChecker] = {
-            route.name: RouteChecker(route) for route in config.routes
-        }
-        self._running = False
-
-    async def _check_route(self, checker: RouteChecker) -> None:
-        """Run a single route check and send alert if needed."""
-        result = await checker.check()
-        logger.debug(
-            "Checked %s: ok=%s latency=%.1fms",
-            result.route_name,
-            result.ok,
-            result.latency_ms,
+        self._config = config
+        self._threads: List[threading.Thread] = []
+        self._stop_events: List[threading.Event] = []
+        self._history = LatencyHistory()
+        self._collector = get_collector()
+        self._reporter = MetricsReporter(
+            interval_seconds=config.metrics_interval_seconds,
+            collector=self._collector,
         )
-        if is_alert(result, checker.route):
-            for webhook in self.config.webhooks:
-                payload = build_payload(result, webhook)
-                await send_alert(payload, webhook)
-                logger.info(
-                    "Alert sent for %s to %s", result.route_name, webhook.url
-                )
 
-    async def _run_route_loop(self, checker: RouteChecker) -> None:
-        """Continuously check a route at its configured interval."""
-        interval = checker.route.interval_seconds
-        while self._running:
-            try:
-                await self._check_route(checker)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error("Unexpected error checking %s: %s", checker.route.name, exc)
-            await asyncio.sleep(interval)
-
-    async def run(self) -> None:
-        """Start all route check loops concurrently."""
-        self._running = True
-        logger.info("Scheduler starting with %d route(s).", len(self._checkers))
-        tasks = [
-            asyncio.create_task(self._run_route_loop(checker))
-            for checker in self._checkers.values()
-        ]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            self._running = False
+    def start(self) -> None:
+        logger.info("Starting scheduler for %d route(s)", len(self._config.routes))
+        for route in self._config.routes:
+            stop_event = threading.Event()
+            self._stop_events.append(stop_event)
+            thread = threading.Thread(
+                target=self._run_route,
+                args=(route, stop_event),
+                name=f"checker-{route.url}",
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+        self._reporter.start()
 
     def stop(self) -> None:
-        """Signal all loops to stop after their current sleep."""
-        logger.info("Scheduler stopping.")
-        self._running = False
+        logger.info("Stopping scheduler...")
+        for ev in self._stop_events:
+            ev.set()
+        for t in self._threads:
+            t.join(timeout=10)
+        self._reporter.stop()
+        logger.info("Scheduler stopped")
+
+    def _run_route(
+        self, route: RouteConfig, stop_event: threading.Event
+    ) -> None:
+        checker = RouteChecker(route, self._history)
+        while not stop_event.wait(route.interval_seconds):
+            result = checker.check()
+            alerted = False
+            if is_alert(result):
+                for webhook in self._config.webhooks:
+                    payload = build_payload(result, webhook)
+                    send_alert(payload, webhook)
+                alerted = True
+            self._collector.record_check(
+                route.url,
+                success=result.error is None and result.status_code == route.expected_status,
+                alerted=alerted,
+            )
