@@ -1,71 +1,83 @@
-"""Route scheduler — runs periodic checks and fires alerts."""
+"""Scheduler that runs periodic HTTP checks for each configured route."""
+
+from __future__ import annotations
 
 import threading
 from typing import List, Optional
 
-from routewatch.alerter import build_payload, send_alert
-from routewatch.checker import RouteChecker, is_alert
 from routewatch.config import AppConfig, RouteConfig, WebhookConfig
-from routewatch.history import LatencyHistory
+from routewatch.checker import RouteChecker
+from routewatch.alerter import build_payload, send_alert
+from routewatch.circuit_breaker import CircuitBreaker
 from routewatch.logging_config import get_logger
-from routewatch.metrics import get_collector
-from routewatch.metrics_reporter import MetricsReporter
 
 logger = get_logger(__name__)
 
 
 class RouteScheduler:
-    """Schedules periodic HTTP checks for all configured routes."""
+    """Manages one timer thread per route, respecting circuit-breaker state."""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        checker: Optional[RouteChecker] = None,
+        breaker: Optional[CircuitBreaker] = None,
+    ) -> None:
         self._config = config
-        self._threads: List[threading.Thread] = []
-        self._stop_events: List[threading.Event] = []
-        self._history = LatencyHistory()
-        self._collector = get_collector()
-        self._reporter = MetricsReporter(
-            interval_seconds=config.metrics_interval_seconds,
-            collector=self._collector,
+        self._checker = checker or RouteChecker()
+        self._breaker = breaker or CircuitBreaker(
+            failure_threshold=config.circuit_breaker_threshold,
+            recovery_timeout_s=config.circuit_breaker_recovery_s,
         )
+        self._timers: List[threading.Timer] = []
+        self._lock = threading.Lock()
+        self._running = False
 
     def start(self) -> None:
-        logger.info("Starting scheduler for %d route(s)", len(self._config.routes))
+        self._running = True
         for route in self._config.routes:
-            stop_event = threading.Event()
-            self._stop_events.append(stop_event)
-            thread = threading.Thread(
-                target=self._run_route,
-                args=(route, stop_event),
-                name=f"checker-{route.url}",
-                daemon=True,
-            )
-            self._threads.append(thread)
-            thread.start()
-        self._reporter.start()
+            self._schedule(route)
+        logger.info("scheduler started with %d route(s)", len(self._config.routes))
 
     def stop(self) -> None:
-        logger.info("Stopping scheduler...")
-        for ev in self._stop_events:
-            ev.set()
-        for t in self._threads:
-            t.join(timeout=10)
-        self._reporter.stop()
-        logger.info("Scheduler stopped")
+        self._running = False
+        with self._lock:
+            for t in self._timers:
+                t.cancel()
+            self._timers.clear()
+        logger.info("scheduler stopped")
 
-    def _run_route(
-        self, route: RouteConfig, stop_event: threading.Event
-    ) -> None:
-        checker = RouteChecker(route, self._history)
-        while not stop_event.wait(route.interval_seconds):
-            result = checker.check()
-            alerted = False
-            if is_alert(result):
+    def _schedule(self, route: RouteConfig) -> None:
+        if not self._running:
+            return
+        t = threading.Timer(route.interval_s, self._run_route, args=(route,))
+        t.daemon = True
+        with self._lock:
+            self._timers.append(t)
+        t.start()
+
+    def _run_route(self, route: RouteConfig) -> None:
+        route_id = f"{route.method} {route.url}"
+        try:
+            if self._breaker.is_open(route_id):
+                logger.debug("circuit open — skipping %s", route_id)
+                return
+
+            result = self._checker.check(route)
+
+            if result.ok:
+                self._breaker.record_success(route_id)
+            else:
+                self._breaker.record_failure(route_id, result.error or str(result.status_code))
                 for webhook in self._config.webhooks:
-                    payload = build_payload(result, webhook)
-                    send_alert(payload, webhook)
-                alerted = True
-            self._collector.record_check(
-                route.url,
-                success=result.error is None and result.status_code == route.expected_status,
-                alerted=alerted,
-            )
+                    if self._should_alert(route, result):
+                        payload = build_payload(result, webhook)
+                        send_alert(payload, webhook)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected error checking %s: %s", route_id, exc)
+        finally:
+            self._schedule(route)
+
+    def _should_alert(self, route: RouteConfig, result) -> bool:  # type: ignore[override]
+        from routewatch.checker import is_alert
+        return is_alert(result, route)
