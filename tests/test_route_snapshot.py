@@ -51,6 +51,14 @@ def test_take_snapshot_reflects_metrics(collector, history):
     assert snap.success_rate == pytest.approx(2 / 3)
 
 
+def test_take_snapshot_timestamp_is_recent(collector, history):
+    """Snapshot timestamp should be set at the time of creation."""
+    before = time.time()
+    snap = take_snapshot(collector, history, URL)
+    after = time.time()
+    assert before <= snap.timestamp <= after
+
+
 def test_diff_snapshots_no_change():
     t = time.time()
     before = RouteSnapshot(URL, t, 1.0, 0.0, 10, 50.0, 0)
