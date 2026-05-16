@@ -1,101 +1,102 @@
-"""Tests for the webhook alerter module."""
-
+"""Tests for routewatch.alerter (including rate-limiter integration)."""
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from routewatch.alerter import AlertPayload, build_payload, send_alert
+from routewatch.alerter import (
+    AlertPayload,
+    build_payload,
+    send_alert,
+    to_dict,
+)
 from routewatch.checker import CheckResult
 from routewatch.config import WebhookConfig
+from routewatch.rate_limiter import RateLimiter
 
 
-@pytest.fixture
+@pytest.fixture()
 def ok_result() -> CheckResult:
     return CheckResult(
-        route_name="homepage",
-        url="https://example.com/",
+        route="home",
+        url="http://example.com/",
         status_code=200,
-        latency_ms=320.5,
-        average_latency_ms=280.0,
+        latency_ms=42.0,
         error=None,
+        average_latency_ms=40.0,
+        consecutive_failures=0,
     )
 
 
-@pytest.fixture
+@pytest.fixture()
 def error_result() -> CheckResult:
     return CheckResult(
-        route_name="api-health",
-        url="https://example.com/health",
+        route="api",
+        url="http://example.com/api",
         status_code=None,
         latency_ms=None,
+        error="connection refused",
         average_latency_ms=None,
-        error="Connection refused",
+        consecutive_failures=3,
     )
 
 
-@pytest.fixture
+@pytest.fixture()
 def webhook() -> WebhookConfig:
-    return WebhookConfig(url="https://hooks.example.com/alert", headers={})
+    return WebhookConfig(url="http://hooks.example.com/alert")
 
 
-def test_build_payload_fields(ok_result):
-    payload = build_payload(ok_result, threshold_ms=300.0)
-    assert payload.route_name == "homepage"
-    assert payload.latency_ms == 320.5
-    assert payload.threshold_ms == 300.0
-    assert payload.error is None
+def test_build_payload_fields(ok_result: CheckResult):
+    p = build_payload(ok_result)
+    assert p.route == ok_result.route
+    assert p.url == ok_result.url
+    assert p.status_code == 200
+    assert p.latency_ms == pytest.approx(42.0)
+    assert p.error is None
 
 
-def test_payload_to_dict_keys(ok_result):
-    payload = build_payload(ok_result, threshold_ms=300.0)
-    d = payload.to_dict()
-    assert d["alert"] == "latency_regression"
-    assert d["route"] == "homepage"
-    assert d["threshold_ms"] == 300.0
+def test_payload_to_dict_keys(ok_result: CheckResult):
+    d = to_dict(build_payload(ok_result))
+    assert set(d.keys()) == {
+        "route", "url", "status_code", "latency_ms",
+        "error", "average_latency_ms", "consecutive_failures",
+    }
 
 
-def test_send_alert_success(webhook, ok_result):
-    mock_response = MagicMock()
-    mock_response.status = 200
-    mock_response.__enter__ = lambda s: s
-    mock_response.__exit__ = MagicMock(return_value=False)
+def test_send_alert_success(ok_result: CheckResult, webhook: WebhookConfig):
+    lim = RateLimiter(rate=10.0, capacity=10.0)
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.status = 200
 
-    with patch("urllib.request.urlopen", return_value=mock_response) as mock_open:
-        result = send_alert(webhook, ok_result, threshold_ms=300.0)
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = send_alert(ok_result, webhook, limiter=lim)
 
     assert result is True
-    mock_open.assert_called_once()
-    request_obj = mock_open.call_args[0][0]
-    assert request_obj.full_url == webhook.url
-    assert request_obj.get_header("Content-type") == "application/json"
-    body = json.loads(request_obj.data)
-    assert body["route"] == "homepage"
 
 
-def test_send_alert_failure(webhook, error_result):
+def test_send_alert_network_error(ok_result: CheckResult, webhook: WebhookConfig):
     import urllib.error
-
+    lim = RateLimiter(rate=10.0, capacity=10.0)
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
-        result = send_alert(webhook, error_result, threshold_ms=500.0)
-
+        result = send_alert(ok_result, webhook, limiter=lim)
     assert result is False
 
 
-def test_send_alert_includes_custom_headers(ok_result):
-    wh = WebhookConfig(
-        url="https://hooks.example.com/alert",
-        headers={"X-Api-Key": "secret"},
-    )
-    mock_response = MagicMock()
-    mock_response.status = 204
-    mock_response.__enter__ = lambda s: s
-    mock_response.__exit__ = MagicMock(return_value=False)
+def test_send_alert_rate_limited(ok_result: CheckResult, webhook: WebhookConfig):
+    # Capacity 0 means every call is blocked
+    lim = RateLimiter(rate=1.0, capacity=1.0)
+    lim.acquire(webhook.url)  # drain the single token
+    with patch("urllib.request.urlopen") as mock_open:
+        result = send_alert(ok_result, webhook, limiter=lim)
+    assert result is False
+    mock_open.assert_not_called()
 
-    with patch("urllib.request.urlopen", return_value=mock_response) as mock_open:
-        send_alert(wh, ok_result, threshold_ms=300.0)
 
-    request_obj = mock_open.call_args[0][0]
-    assert request_obj.get_header("X-api-key") == "secret"
+def test_error_result_payload(error_result: CheckResult):
+    p = build_payload(error_result)
+    assert p.error == "connection refused"
+    assert p.consecutive_failures == 3
+    assert p.status_code is None

@@ -1,31 +1,33 @@
 {
-  "check_interval_seconds": 60,
-  "alert_cooldown_seconds": 300,
   "routes": [
     {
-      "name": "Homepage",
+      "name": "homepage",
       "url": "https://example.com/",
-      "method": "GET",
-      "timeout": 5.0,
-      "latency_threshold_ms": 300.0,
+      "interval_seconds": 30,
+      "timeout_seconds": 5,
       "expected_status": 200,
-      "headers": {
-        "User-Agent": "routewatch/1.0"
-      }
+      "latency_threshold_ms": 500
     },
     {
-      "name": "API Health",
-      "url": "https://api.example.com/health",
-      "method": "GET",
-      "timeout": 3.0,
-      "latency_threshold_ms": 150.0,
-      "expected_status": 200
+      "name": "api-health",
+      "url": "https://example.com/api/health",
+      "interval_seconds": 15,
+      "timeout_seconds": 3,
+      "expected_status": 200,
+      "latency_threshold_ms": 200
     }
   ],
   "webhooks": [
     {
-      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
-      "secret": null
+      "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ"
     }
-  ]
+  ],
+  "rate_limiter": {
+    "rate": 1.0,
+    "capacity": 5.0
+  },
+  "log_level": "INFO",
+  "history_path": ".routewatch_history.json",
+  "metrics_interval_seconds": 60,
+  "status_interval_seconds": 120
 }

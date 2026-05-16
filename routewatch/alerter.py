@@ -1,74 +1,86 @@
-"""Webhook alerter for sending latency regression notifications."""
-
+"""Webhook alerting with optional rate limiting."""
 from __future__ import annotations
 
 import json
-import logging
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
-from typing import Optional
 
 from routewatch.checker import CheckResult
 from routewatch.config import WebhookConfig
+from routewatch.logging_config import get_logger
+from routewatch.rate_limiter import RateLimiter
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
+
+# Module-level shared rate limiter (1 alert/sec, burst of 5)
+_default_limiter: RateLimiter = RateLimiter(rate=1.0, capacity=5.0)
 
 
 @dataclass
 class AlertPayload:
-    route_name: str
+    route: str
     url: str
     status_code: Optional[int]
     latency_ms: Optional[float]
-    average_latency_ms: Optional[float]
     error: Optional[str]
-    threshold_ms: float
-
-    def to_dict(self) -> dict:
-        return {
-            "alert": "latency_regression",
-            "route": self.route_name,
-            "url": self.url,
-            "status_code": self.status_code,
-            "latency_ms": self.latency_ms,
-            "average_latency_ms": self.average_latency_ms,
-            "error": self.error,
-            "threshold_ms": self.threshold_ms,
-        }
+    average_latency_ms: Optional[float]
+    consecutive_failures: int
 
 
-def build_payload(result: CheckResult, threshold_ms: float) -> AlertPayload:
+def to_dict(payload: AlertPayload) -> Dict[str, Any]:
+    return {
+        "route": payload.route,
+        "url": payload.url,
+        "status_code": payload.status_code,
+        "latency_ms": payload.latency_ms,
+        "error": payload.error,
+        "average_latency_ms": payload.average_latency_ms,
+        "consecutive_failures": payload.consecutive_failures,
+    }
+
+
+def build_payload(result: CheckResult) -> AlertPayload:
     return AlertPayload(
-        route_name=result.route_name,
+        route=result.route,
         url=result.url,
         status_code=result.status_code,
         latency_ms=result.latency_ms,
-        average_latency_ms=result.average_latency_ms,
         error=result.error,
-        threshold_ms=threshold_ms,
+        average_latency_ms=result.average_latency_ms,
+        consecutive_failures=result.consecutive_failures,
     )
 
 
-def send_alert(webhook: WebhookConfig, result: CheckResult, threshold_ms: float) -> bool:
-    """Send an alert to the configured webhook URL.
+def send_alert(
+    result: CheckResult,
+    webhook: WebhookConfig,
+    limiter: Optional[RateLimiter] = None,
+) -> bool:
+    """Send an alert to *webhook*.  Returns True on success.
 
-    Returns True if the request succeeded, False otherwise.
+    If *limiter* is provided (or the module default is used), the call is
+    rate-limited per webhook URL.  Blocked calls are logged and return False.
     """
-    payload = build_payload(result, threshold_ms)
-    body = json.dumps(payload.to_dict()).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    headers.update(webhook.headers)
+    active_limiter = limiter if limiter is not None else _default_limiter
+    if not active_limiter.acquire(webhook.url):
+        log.warning("rate-limited: skipping alert for %s -> %s", result.route, webhook.url)
+        return False
 
-    req = urllib.request.Request(webhook.url, data=body, headers=headers, method="POST")
+    payload = build_payload(result)
+    body = json.dumps(to_dict(payload)).encode()
+    req = urllib.request.Request(
+        webhook.url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            logger.info(
-                "Alert sent for route '%s' — webhook responded %s",
-                result.route_name,
-                resp.status,
-            )
+            log.info("alert sent to %s (HTTP %s)", webhook.url, resp.status)
             return True
     except urllib.error.URLError as exc:
-        logger.error("Failed to send alert for route '%s': %s", result.route_name, exc)
+        log.error("failed to send alert to %s: %s", webhook.url, exc)
         return False
