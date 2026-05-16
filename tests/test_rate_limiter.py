@@ -64,6 +64,23 @@ def test_tokens_refill_over_time(monkeypatch):
     assert lim.acquire(key) is False  # only 0.5 left
 
 
+def test_tokens_do_not_exceed_capacity(monkeypatch):
+    """Available tokens must be capped at capacity even after a long idle period."""
+    clock = [0.0]
+
+    def fake_monotonic():
+        return clock[0]
+
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+    lim = RateLimiter(rate=2.0, capacity=3.0)
+    key = "overflow"
+    lim.acquire(key)  # consume one token
+
+    clock[0] += 100.0  # far more time than needed to refill
+    assert lim.available_tokens(key) == pytest.approx(3.0)
+
+
 def test_available_tokens_reflects_capacity(limiter: RateLimiter):
     tokens = limiter.available_tokens("new-key")
     assert tokens == pytest.approx(3.0)
