@@ -72,3 +72,11 @@ def test_reporter_logs_degraded_status(collector, history, caplog):
 
     messages = " ".join(caplog.messages)
     assert "DEGRADED" in messages
+
+
+def test_reporter_stop_without_start(collector, history):
+    """Stopping a reporter that was never started should not raise an error."""
+    reporter = StatusReporter(collector, history, ROUTE_URLS, interval_seconds=10.0)
+    # Should not raise even though the thread was never started
+    reporter.stop()
+    assert reporter._thread is None
