@@ -1,95 +1,90 @@
-"""Tests for routewatch configuration loader."""
+"""Tests for routewatch.config including tag fields."""
+from __future__ import annotations
 
 import json
-import os
 import pytest
-from routewatch.config import load_config, AppConfig, RouteConfig, WebhookConfig
+
+from routewatch.config import AppConfig, RouteConfig, WebhookConfig, load_config
 
 
-@pytest.fixture
+@pytest.fixture()
 def minimal_config(tmp_path):
-    cfg = {
-        "routes": [
-            {"name": "Test Route", "url": "https://example.com/"}
-        ],
-        "webhooks": [
-            {"url": "https://hooks.example.com/alert"}
-        ]
-    }
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps(cfg))
-    return str(config_file)
+    data = {"routes": [{"url": "https://example.com"}]}
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps(data))
+    return p
 
 
-@pytest.fixture
+@pytest.fixture()
 def full_config(tmp_path):
-    cfg = {
-        "check_interval_seconds": 30,
-        "alert_cooldown_seconds": 120,
+    data = {
         "routes": [
             {
-                "name": "API",
-                "url": "https://api.example.com/health",
-                "method": "POST",
-                "timeout": 2.0,
-                "latency_threshold_ms": 100.0,
+                "url": "https://example.com/api",
+                "interval_seconds": 15,
                 "expected_status": 201,
-                "headers": {"Authorization": "Bearer token"}
+                "timeout_seconds": 3.0,
+                "latency_threshold_ms": 500.0,
+                "tags": ["prod", "api"],
             }
         ],
-        "webhooks": [
-            {"url": "https://hooks.example.com/alert", "secret": "s3cr3t"}
-        ]
+        "webhooks": [{"url": "https://hooks.example.com", "secret": "s3cr3t"}],
+        "history_path": "/tmp/hist.json",
+        "log_level": "DEBUG",
+        "metrics_interval_seconds": 30,
+        "status_interval_seconds": 90,
+        "health_port": 9090,
+        "tag_include": ["prod"],
+        "tag_exclude": ["internal"],
     }
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps(cfg))
-    return str(config_file)
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps(data))
+    return p
 
 
 def test_load_minimal_config(minimal_config):
-    config = load_config(minimal_config)
-    assert isinstance(config, AppConfig)
-    assert len(config.routes) == 1
-    assert len(config.webhooks) == 1
-    assert config.check_interval_seconds == 60
-    assert config.alert_cooldown_seconds == 300
+    cfg = load_config(minimal_config)
+    assert isinstance(cfg, AppConfig)
+    assert len(cfg.routes) == 1
+    assert cfg.routes[0].url == "https://example.com"
 
 
 def test_route_defaults(minimal_config):
-    config = load_config(minimal_config)
-    route = config.routes[0]
-    assert isinstance(route, RouteConfig)
-    assert route.name == "Test Route"
-    assert route.url == "https://example.com/"
-    assert route.method == "GET"
-    assert route.timeout == 5.0
-    assert route.latency_threshold_ms == 500.0
-    assert route.expected_status == 200
-    assert route.headers == {}
+    cfg = load_config(minimal_config)
+    r = cfg.routes[0]
+    assert r.interval_seconds == 60
+    assert r.expected_status == 200
+    assert r.timeout_seconds == 10.0
+    assert r.latency_threshold_ms == 2000.0
+    assert r.tags == []
 
 
 def test_load_full_config(full_config):
-    config = load_config(full_config)
-    assert config.check_interval_seconds == 30
-    assert config.alert_cooldown_seconds == 120
-    route = config.routes[0]
-    assert route.method == "POST"
-    assert route.timeout == 2.0
-    assert route.latency_threshold_ms == 100.0
-    assert route.expected_status == 201
-    assert route.headers == {"Authorization": "Bearer token"}
-    webhook = config.webhooks[0]
-    assert isinstance(webhook, WebhookConfig)
-    assert webhook.secret == "s3cr3t"
+    cfg = load_config(full_config)
+    r = cfg.routes[0]
+    assert r.interval_seconds == 15
+    assert r.expected_status == 201
+    assert r.tags == ["prod", "api"]
+
+    assert cfg.log_level == "DEBUG"
+    assert cfg.health_port == 9090
+    assert cfg.tag_include == ["prod"]
+    assert cfg.tag_exclude == ["internal"]
 
 
-def test_missing_config_raises():
+def test_webhook_parsed(full_config):
+    cfg = load_config(full_config)
+    assert len(cfg.webhooks) == 1
+    assert cfg.webhooks[0].url == "https://hooks.example.com"
+    assert cfg.webhooks[0].secret == "s3cr3t"
+
+
+def test_tag_filter_defaults(minimal_config):
+    cfg = load_config(minimal_config)
+    assert cfg.tag_include == []
+    assert cfg.tag_exclude == []
+
+
+def test_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
-        load_config("/nonexistent/path/config.json")
-
-
-def test_env_var_config_path(full_config, monkeypatch):
-    monkeypatch.setenv("ROUTEWATCH_CONFIG", full_config)
-    config = load_config()
-    assert len(config.routes) == 1
-    assert config.routes[0].name == "API"
+        load_config(tmp_path / "nonexistent.json")
