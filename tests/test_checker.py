@@ -93,3 +93,18 @@ def test_no_threshold_does_not_alert(basic_route):
 
     assert result.threshold_exceeded is False
     assert result.is_alert is False
+
+
+@respx.mock
+def test_timeout_triggers_alert(basic_route):
+    """A timeout error should mark the result as failed and trigger an alert."""
+    respx.get("https://example.com/health").mock(
+        side_effect=httpx.TimeoutException("request timed out")
+    )
+    checker = RouteChecker(config=basic_route)
+    result = checker.check()
+
+    assert result.success is False
+    assert result.status_code is None
+    assert result.error is not None
+    assert result.is_alert is True
