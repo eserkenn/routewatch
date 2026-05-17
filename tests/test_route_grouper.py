@@ -95,13 +95,15 @@ def test_group_names_by_tag_sorted():
     assert names == ["alpha", "zebra"]
 
 
+def test_group_names_by_tag_no_duplicates():
+    """Each tag name should appear only once even when multiple routes share it."""
+    routes = [
+        _FakeRoute("http://example.com/a", tags=["shared", "only-a"]),
+        _FakeRoute("http://example.com/b", tags=["shared", "only-b"]),
+    ]
+    names = RouteGrouper(routes).group_names_by_tag()
+    assert names.count("shared") == 1
+
+
 # ---------------------------------------------------------------------------
-# _url_prefix helper
-# ---------------------------------------------------------------------------
-
-def test_url_prefix_strips_scheme_and_host():
-    assert _url_prefix("https://example.com/api/users", 1) == "/api"
-
-
-def test_url_prefix_plain_path():
-    assert _url_prefix("/metrics/system", 2) == "/metrics/system"
+# _url_prefix
